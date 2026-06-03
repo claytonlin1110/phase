@@ -2576,6 +2576,18 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.160a + CR 718.3a: When the caller explicitly opted into Prototype
+    // (via `variant_override = Some(CastingVariant::Prototype)`), substitute the
+    // prototype mana cost from `Keyword::Prototype { cost, .. }`.
+    // Mirrors Impending / Overload / Bestow / Cleave / Awaken cost substitution.
+    let prototype_cost = if casting_variant == CastingVariant::Prototype {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Prototype { cost, .. } => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
@@ -2698,6 +2710,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(awaken_cost)
             .or(cleave_cost)
             .or(impending_cost)
+            .or(prototype_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -4222,6 +4235,37 @@ pub fn handle_impending_cost_choice_with_payment_mode(
                 player,
                 object_id,
                 Some(CastingVariant::Impending),
+            )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+/// CR 702.160a + CR 718.3b: Handle Prototype cost choice and proceed with
+/// casting. For `AlternativeCastDecision::Alternative`, the cast is prepared
+/// with `CastingVariant::Prototype` — the prototype mana cost substitutes for
+/// the printed mana cost. For `AlternativeCastDecision::Normal`, the spell is
+/// cast normally with the full printed cost.
+pub fn handle_prototype_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let mut prepared = prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Prototype),
             )?;
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
@@ -5852,6 +5896,59 @@ pub fn handle_cast_spell_with_payment_mode(
                 if !normal_affordable && impending_affordable {
                     // Only impending cost is payable — proceed via the impending path.
                     return handle_impending_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.160a + CR 718.3a: Prototype — when a hand card has
+    // `Keyword::Prototype { cost, .. }` and both costs are affordable,
+    // present the choice. Auto-skip when only one cost is viable.
+    // Prototype has no targeting prerequisite (CR 718.3b doesn't require a
+    // legal target for the prototype path — unlike Bestow/Awaken). A fall-
+    // through proceeds as a normal creature cast with the printed P/T.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(proto_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Prototype { cost, .. } => Some(cost.clone()),
+                _ => None,
+            }) {
+                // CR 601.2f + CR 118.9d: affordability must reflect active cost
+                // modifiers applied to BOTH the printed cost and the prototype alt cost.
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let proto_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, proto_cost.clone())
+                        .unwrap_or_else(|| proto_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let proto_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &proto_cost_eff);
+                if normal_affordable && proto_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Prototype,
+                        normal_cost,
+                        alternative_cost: Some(proto_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && proto_affordable {
+                    // Only prototype cost is payable — proceed via the prototype path.
+                    return handle_prototype_cost_choice_with_payment_mode(
                         state,
                         player,
                         object_id,

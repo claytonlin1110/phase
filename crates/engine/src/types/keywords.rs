@@ -591,10 +591,14 @@ pub enum Keyword {
         cost: ManaCost,
     },
     Fortify(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
-    /// secondary P/T and mana cost characteristics.
-    Prototype(ManaCost),
+    /// CR 702.160a + CR 718.3b: Prototype — alt-cast using the secondary P/T
+    /// and mana cost. When cast as prototyped, the permanent uses `cost`,
+    /// `power`, and `toughness` as its characteristics while it is a creature.
+    Prototype {
+        cost: ManaCost,
+        power: i32,
+        toughness: i32,
+    },
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
@@ -1071,7 +1075,7 @@ impl Keyword {
             | Keyword::Nightbound
             | Keyword::Overload(_)
             | Keyword::Poisonous(_)
-            | Keyword::Prototype(_)
+            | Keyword::Prototype { .. }
             | Keyword::Provoke
             | Keyword::Prowl(_)
             | Keyword::Ravenous
@@ -1637,7 +1641,37 @@ impl FromStr for Keyword {
                     // Fall through to Unknown
                 }
                 "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
-                "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
+                "prototype" => {
+                    // CR 702.160a + CR 718.2: Oracle text is "{cost} — N/M (reminder…)"
+                    // or just "{cost}" when coming from MTGJSON keyword arrays.
+                    // Strip reminder text in parentheses first, then split on em-dash.
+                    let stripped = p.find(" (").map(|i| p[..i].trim()).unwrap_or(p.trim());
+                    if let Some((cost_str, pt_str)) = stripped.split_once('\u{2014}') {
+                        let cost = parse_keyword_mana_cost(cost_str.trim());
+                        let pt_str = pt_str.trim();
+                        let (power, toughness) = pt_str
+                            .split_once('/')
+                            .and_then(|(pw, th)| {
+                                Some((
+                                    pw.trim().parse::<i32>().ok()?,
+                                    th.trim().parse::<i32>().ok()?,
+                                ))
+                            })
+                            .unwrap_or((0, 0));
+                        return Ok(Keyword::Prototype {
+                            cost,
+                            power,
+                            toughness,
+                        });
+                    }
+                    // MTGJSON keyword array: only mana cost, no P/T in this string.
+                    // P/T will be filled by keyword_from_tagged (JSON deserialization).
+                    return Ok(Keyword::Prototype {
+                        cost: parse_keyword_mana_cost(p),
+                        power: 0,
+                        toughness: 0,
+                    });
+                }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
@@ -2308,7 +2342,25 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             Ok(Keyword::Awaken { count, cost })
         }
         "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
-        "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
+        "Prototype" => {
+            // New format: {"Prototype": {"cost": {...}, "power": N, "toughness": M}}
+            // Legacy format: {"Prototype": <ManaCost>} — P/T defaults to 0 for backwards compat.
+            if let Some(cost_val) = data.get("cost") {
+                let power = data.get("power").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let toughness = data.get("toughness").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                Ok(Keyword::Prototype {
+                    cost: mana(cost_val)?,
+                    power,
+                    toughness,
+                })
+            } else {
+                Ok(Keyword::Prototype {
+                    cost: mana(data)?,
+                    power: 0,
+                    toughness: 0,
+                })
+            }
+        }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),

@@ -391,8 +391,16 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // (`Keyword::TotemArmor`) per the documented Oracle erratum.
         Rule::UmbraArmor => Keyword::TotemArmor,
 
-        Rule::Prototype { mana_cost, .. } => {
-            Keyword::Prototype(crate::convert::mana::convert_x(mana_cost)?)
+        Rule::Prototype { mana_cost, card_pt } => {
+            // CR 702.160a + CR 718.2: Prototype carries alt cost + alt P/T.
+            let cost = crate::convert::mana::convert_x(mana_cost)?;
+            let power = card_pt.power;
+            let toughness = card_pt.toughness;
+            Keyword::Prototype {
+                cost,
+                power,
+                toughness,
+            }
         }
 
         // CR 702.138a: Escape — alternative casting cost from graveyard.

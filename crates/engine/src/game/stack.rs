@@ -997,6 +997,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.160a + CR 718.3b: Prototype-cast permanent gets the
+            // `cast_variant_paid` tag re-applied after
+            // `reset_for_battlefield_entry` cleared it. The layers post-fixup
+            // reads this marker to apply the prototype P/T and mana cost while
+            // the permanent remains a creature (CR 702.160d).
+            if casting_variant == CastingVariant::Prototype {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Prototype,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.62a: Suspend-cast permanent gets the `cast_variant_paid`
             // tag for symmetry with Evoke / Sneak (no synthesized trigger reads
             // it today, but it preserves the audit trail). Additionally, when

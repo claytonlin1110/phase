@@ -9,7 +9,7 @@ use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_value
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
+    AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, CastingPermission,
     CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, FilterProp,
     ManaContribution, ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition,
     TargetFilter, TypedFilter,
@@ -1343,6 +1343,44 @@ pub fn evaluate_layers(state: &mut GameState) {
         if let Some(obj) = state.objects.get_mut(&id) {
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 702.160a + CR 718.3b: Prototype post-fixup — a permanent cast for its
+    // prototype cost uses the prototype P/T and mana cost as its characteristics
+    // while it is a creature. CR 702.160d: when it stops being a creature the
+    // override does not apply (the base reset already restored the printed values).
+    for &id in &bf_ids {
+        let proto_payload = state.objects.get(&id).and_then(|obj| {
+            let is_prototype_cast = obj
+                .cast_variant_paid
+                .is_some_and(|(v, _)| v == CastVariantPaid::Prototype);
+            if !is_prototype_cast {
+                return None;
+            }
+            let is_creature = obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|t| *t == crate::types::card_type::CoreType::Creature);
+            if !is_creature {
+                return None;
+            }
+            obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Prototype {
+                    cost,
+                    power,
+                    toughness,
+                } => Some((cost.clone(), *power, *toughness)),
+                _ => None,
+            })
+        });
+        if let Some((proto_cost, proto_power, proto_toughness)) = proto_payload {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.power = Some(proto_power);
+                obj.toughness = Some(proto_toughness);
+                obj.mana_cost = proto_cost;
             }
         }
     }

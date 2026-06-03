@@ -1668,6 +1668,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Prototype => {
+                    // CR 702.160a + CR 718.3b: Handle the prototype alternative cost choice.
+                    casting::handle_prototype_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
             }
         }
         (

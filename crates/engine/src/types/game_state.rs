@@ -1679,6 +1679,9 @@ pub enum AlternativeCastKeyword {
     /// permanent enters with N time counters and isn't a creature until the last
     /// is removed. An end-step trigger removes one counter per turn.
     Impending,
+    /// CR 702.160a + CR 718.3b: Prototype alternative cost paid from hand. The
+    /// permanent enters with the prototype P/T and mana cost while a creature.
+    Prototype,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3734,6 +3737,13 @@ pub enum CastingVariant {
     /// with N time counters (from the keyword) and is not a creature while any
     /// remain. At the beginning of your end step one time counter is removed.
     Impending,
+    /// CR 702.160a + CR 718.3b: Cast from hand via Prototype's alternative cost.
+    /// The printed mana cost is replaced by `Keyword::Prototype { cost, .. }` at
+    /// cast preparation (mirrors Overload/Impending). On resolution the permanent
+    /// enters with the prototype P/T and mana cost, applied by the layers
+    /// post-fixup while the permanent is a creature (CR 718.3b). Reverts to
+    /// printed characteristics if the permanent stops being a creature (CR 702.160d).
+    Prototype,
 }
 
 impl CastingVariant {

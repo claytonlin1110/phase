@@ -4443,6 +4443,11 @@ pub enum CastVariantPaid {
     /// while any remain. Read by the end-step counter-removal trigger and
     /// the "not a creature" layer fixup.
     Impending,
+    /// CR 702.160a + CR 718.3b: The spell was cast for its prototype
+    /// alternative cost. While on the battlefield as a creature, the
+    /// permanent uses the prototype P/T and mana cost instead of the
+    /// printed characteristics. Read by the layers post-fixup.
+    Prototype,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
