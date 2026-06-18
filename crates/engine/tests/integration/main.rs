@@ -291,6 +291,7 @@ mod issue_874_nadiers_nightblade_token_leaves;
 mod issue_879_obsessive_pursuit;
 mod issue_924_offspring;
 mod issue_927_tireless_provisioner;
+mod issue_970_triome_play_or_cycle_choice;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
