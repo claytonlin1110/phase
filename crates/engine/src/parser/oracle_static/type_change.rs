@@ -1,5 +1,6 @@
 // CR 613.3d (Layer 4) — type-changing static abilities.
 
+use super::super::oracle_nom::error::oracle_err;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
@@ -202,21 +203,44 @@ pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleRes
     Ok((input, ()))
 }
 
+/// CR 205.1a / CR 205.1b: Parse the optional "in addition to `<pronoun>` other
+/// [creature ]types" additive suffix shared by every "chosen [creature] type"
+/// static, single-subject and compound-subject alike (see
+/// `parse_compound_you_control_chosen_type_static`). Returns whether the suffix
+/// was present — additive (CR 205.1b, e.g. Arcane Adaptation) when present,
+/// replacing (CR 205.1a SET, e.g. Conspiracy's bare "are the chosen type") when
+/// absent. The optional "creature " infix accommodates predicates that spell out
+/// "other creature types" instead of the bare "other types" (Rukarumel,
+/// Biologist: "...in addition to their other creature types").
+fn parse_chosen_type_addition_suffix<'a>(
+    input: &'a str,
+    pronoun: &'static str,
+) -> OracleResult<'a, bool> {
+    let (input, addition) = opt((
+        tag(" in addition to "),
+        tag(pronoun),
+        tag(" other "),
+        opt(tag("creature ")),
+        tag("types"),
+    ))
+    .parse(input)?;
+    Ok((input, addition.is_some()))
+}
+
 /// CR 205.1a / CR 205.1b + CR 607.2d: Parse the "<scope> are the chosen [creature]
-/// type [in addition to their other types]" body, returning the affected scope and
-/// whether the effect is additive (CR 205.1b "in addition") or replacing (CR 205.1a
-/// SET — Conspiracy's bare "are the chosen type"). The "in addition to ..." suffix is
-/// OPTIONAL: Arcane Adaptation / Lifecraft Engine / Xenograft are additive; Conspiracy
-/// omits it and replaces the creature types.
+/// type [in addition to their other [creature ]types]" body, returning the
+/// affected scope and whether the effect is additive (CR 205.1b "in addition") or
+/// replacing (CR 205.1a SET — Conspiracy's bare "are the chosen type"). The
+/// "in addition to ..." suffix is OPTIONAL: Arcane Adaptation / Lifecraft Engine /
+/// Xenograft are additive; Conspiracy omits it and replaces the creature types.
 fn parse_chosen_creature_type_static_scope_body(
     input: &str,
 ) -> OracleResult<'_, (ChosenCreatureTypeStaticScope, ChosenCreatureTypeApplication)> {
     let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
     let (input, _) =
         alt((tag(" the chosen type"), tag(" the chosen creature type"))).parse(input)?;
-    let (input, addition) =
-        opt((tag(" in addition to "), tag(pronoun), tag(" other types"))).parse(input)?;
-    let application = if addition.is_some() {
+    let (input, is_additive) = parse_chosen_type_addition_suffix(input, pronoun)?;
+    let application = if is_additive {
         ChosenCreatureTypeApplication::Additive
     } else {
         ChosenCreatureTypeApplication::Replacing
@@ -243,6 +267,120 @@ pub(crate) fn parse_chosen_creature_type_static_subject(
         ),
     ))
     .parse(input)
+}
+
+/// CR 607.2d + CR 205.3m: Resolve the compound subject shared by
+/// [`parse_compound_you_control_chosen_type_static`] and its same-is-true
+/// prefix matcher — "`<X>` you control and `<Y>` you control" — by delegating
+/// WHOLE to the already-generic [`parse_continuous_subject_filter`], which
+/// distributes it into an `Or` filter via
+/// `parse_controlled_compound_continuous_subject_filter` (each conjunct
+/// independently resolved — "Slivers you control" as a subtype filter,
+/// "nontoken creatures you control" as a `FilterProp::NonToken` filter) —
+/// reused verbatim, not reimplemented.
+///
+/// Requires 2+ branches AND that every branch is CREATURE-scoped (carries
+/// `TypeFilter::Creature`). The creature gate is the same defensive discipline
+/// `branch_names_creatures` applies to the tribal-anthem compound helper: it
+/// keeps a land-axis compound subject (a hypothetical "`<X>` you control and
+/// `<Y>` you control are the chosen [land] type" line) from being misclassified
+/// as a CREATURE-type chosen-type static — the #5147 failure mode (Life and
+/// Limb's Forest land-subtype conjunct) generalized to this axis.
+///
+/// Both callers share this ONE resolution so the same-is-true tail boundary
+/// (computed by the prefix matcher) can never diverge from what the AST
+/// builder actually claims — a mismatch would silently drop the modeled
+/// sentence's static (tail stripped, but nothing left to claim the remainder).
+fn resolve_compound_you_control_chosen_type_subject(subject: &str) -> Option<TargetFilter> {
+    let affected = parse_continuous_subject_filter(subject)?;
+    let TargetFilter::Or { filters } = &affected else {
+        return None;
+    };
+    let all_creature_scoped = filters.iter().all(|filter| {
+        matches!(filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+    });
+    if filters.len() < 2 || !all_creature_scoped {
+        return None;
+    }
+    Some(affected)
+}
+
+/// CR 607.2d + CR 205.1b: "`<X>` you control and `<Y>` you control are the
+/// chosen [creature] type in addition to their other [creature ]types" — a
+/// compound-subject sibling of [`parse_arcane_adaptation_chosen_type_static`]
+/// for chosen-type statics whose subject is not one of the three fixed
+/// single-subject forms [`parse_chosen_creature_type_static_subject`]
+/// recognizes. Rukarumel, Biologist is the type specimen: "Slivers you control
+/// and nontoken creatures you control are the chosen type in addition to their
+/// other creature types."
+///
+/// The subject is resolved by
+/// [`resolve_compound_you_control_chosen_type_subject`]; this function only
+/// owns the predicate: the chosen-type link (CR 607.2d) and the
+/// additive-vs-replacing gate (CR 205.1a/b), shared with the single-subject
+/// sibling via [`parse_chosen_type_addition_suffix`].
+///
+/// Declines (returns `None`) unless the resolved subject is a genuine
+/// creature-scoped `Or` of 2+ filters, so single-subject lines ("Creatures you
+/// control are...") are left untouched for
+/// `parse_arcane_adaptation_chosen_type_static`. Also declines a non-additive
+/// (CR 205.1a replacement) predicate: no known compound-subject printing
+/// replaces creature types outright, so this handler doesn't guess a
+/// `RemoveAllSubtypes` + re-add composition for a shape that's never been
+/// printed.
+pub(crate) fn parse_compound_you_control_chosen_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" are ")?;
+    let affected = resolve_compound_you_control_chosen_type_subject(subject_tp.original)?;
+
+    let (is_additive, _) = nom_on_lower(predicate_tp.original, predicate_tp.lower, |input| {
+        let (input, _) =
+            alt((tag("the chosen type"), tag("the chosen creature type"))).parse(input)?;
+        let (input, is_additive) = parse_chosen_type_addition_suffix(input, "their")?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        Ok((input, is_additive))
+    })?;
+
+    if !is_additive {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            }])
+            .description(description.to_string()),
+    )
+}
+
+/// Prefix check for [`parse_compound_you_control_chosen_type_static`]'s
+/// modeled sentence, used by `push_same_is_true_static_tail` (`oracle.rs`) to
+/// locate the boundary of a trailing "The same is true for ..." continuation
+/// (Rukarumel's non-battlefield tail — see the doc comment on
+/// [`parse_every_creature_type_static`] for why that tail is out of scope;
+/// Maskwood Nexus carries the identical tail). Shares
+/// [`resolve_compound_you_control_chosen_type_subject`] with the AST builder
+/// above so the tail boundary this computes can never diverge from what that
+/// function actually claims (see that resolver's doc comment). Case does not
+/// affect the resolution (subtype lookup is case-insensitive), so running the
+/// shared resolver on lowercase input here is safe.
+pub(crate) fn parse_compound_you_control_chosen_type_static_prefix(
+    input: &str,
+) -> OracleResult<'_, ()> {
+    let (_, (subject, predicate)) = nom_primitives::split_once_on(input, " are ")?;
+    if resolve_compound_you_control_chosen_type_subject(subject).is_none() {
+        return Err(oracle_err(input));
+    }
+
+    let (rest, _) =
+        alt((tag("the chosen type"), tag("the chosen creature type"))).parse(predicate)?;
+    let (rest, _) = parse_chosen_type_addition_suffix(rest, "their")?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, ()))
 }
 
 // CR 613.1d + CR 205.3m: "<creatures you control are> every creature type" —

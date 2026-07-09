@@ -18582,6 +18582,155 @@ fn parser_shape_xenograft_chosen_type_applies_to_each_creature_you_control() {
     }
 }
 
+// CR 607.2d + CR 205.1b: Rukarumel, Biologist's compound-subject chosen-type
+// static — "Slivers you control and nontoken creatures you control are the
+// chosen type in addition to their other creature types." Neither existing
+// chosen-type handler covers this: the fixed-form subject matcher only
+// recognizes three literal single-subject phrases, and the additive-suffix
+// grammar (pre-refactor) only accepted "other types", not "other creature
+// types". `parse_compound_you_control_chosen_type_static` delegates the
+// subject whole to `parse_continuous_subject_filter` (already generic) and
+// only owns the chosen-type predicate.
+#[test]
+fn parser_shape_rukarumel_compound_subject_chosen_type_static() {
+    let def = parse_static_line(
+        "Slivers you control and nontoken creatures you control are the chosen type \
+         in addition to their other creature types.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        &def.modifications,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        "additive compound form must be a single AddChosenSubtype: {:?}",
+        def.modifications
+    );
+
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected an Or of the two subjects: {:?}", def.affected);
+    };
+    assert_eq!(filters.len(), 2, "one disjunct per subject: {filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Sliver")))),
+        "Sliver conjunct must be a creature subtype you control: {:?}",
+        def.affected
+    );
+    assert!(
+        filters.iter().any(|f| matches!(f, TargetFilter::Typed(tf)
+            if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+                && tf.properties.contains(&FilterProp::NonToken))),
+        "nontoken-creature conjunct must carry FilterProp::NonToken: {:?}",
+        def.affected
+    );
+}
+
+// Full Rukarumel oracle (regression): the compound-subject static must be
+// present AND the non-battlefield "the same is true for ..." tail must survive
+// as a separate Unimplemented residual — matching Arcane Adaptation / Maskwood
+// Nexus's existing precedent for the identical tail — rather than either being
+// silently dropped or causing the whole line to strict-fail.
+#[test]
+fn parse_rukarumel_full_oracle_adds_compound_static_and_gaps_tail() {
+    let oracle = "As Rukarumel enters, choose a creature type.\nSlivers you control and \
+                  nontoken creatures you control are the chosen type in addition to their \
+                  other creature types. The same is true for creature spells you control \
+                  and creature cards you own that aren't on the battlefield.\n{3}, {T}: \
+                  Create a 1/1 colorless Sliver creature token.";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Rukarumel, Biologist",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Wizard".to_string()],
+    );
+
+    let has_compound_static = result.statics.iter().any(|def| {
+        matches!(&def.affected, Some(TargetFilter::Or { filters }) if filters.len() == 2)
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                })
+    });
+    assert!(
+        has_compound_static,
+        "Rukarumel must produce the compound-subject additive static: {:?}",
+        result.statics
+    );
+
+    let tail_gapped = result.abilities.iter().any(|ability| {
+        matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { description: Some(ref frag), .. }
+                // allow-noncombinator: test assertion on a gapped Unimplemented fragment, not parser dispatch
+                if frag.contains("creature spells you control")
+        )
+    });
+    assert!(
+        tail_gapped,
+        "the 'same is true for ...' tail must be gapped as Unimplemented: {:?}",
+        result.abilities
+    );
+}
+
+// Gate regression: the compound handler must not disturb the three fixed
+// single-subject forms (left to `parse_arcane_adaptation_chosen_type_static`),
+// and must decline a compound subject whose predicate lacks the CR 205.1b
+// additive marker — no known printing REPLACES creature types via a
+// compound subject, so guessing a RemoveAllSubtypes composition here would be
+// unverified behavior.
+#[test]
+fn compound_subject_chosen_type_static_leaves_single_subject_forms_and_declines_replacement() {
+    // Single-subject forms are unaffected (still route to the fixed-form sibling).
+    for line in [
+        "Creatures you control are the chosen type in addition to their other types.",
+        "Each creature you control is the chosen type in addition to its other types.",
+        "Vehicle creatures you control are the chosen creature type in addition to their other types.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must still parse"));
+        assert!(
+            matches!(&def.affected, Some(TargetFilter::Typed(_))),
+            "{line} must resolve to a single Typed filter, not a compound Or: {:?}",
+            def.affected
+        );
+    }
+
+    // A compound subject with no "in addition to" marker is a type REPLACEMENT
+    // shape with no known printing; the additive handler must decline it, and no
+    // other handler claims it either.
+    assert!(
+        parse_static_line("Elves you control and Goblins you control are the chosen type.")
+            .is_none(),
+        "non-additive compound chosen-type line must not be claimed by any handler"
+    );
+}
+
+// CR 205.1b: the additive-suffix refactor (`parse_chosen_type_addition_suffix`)
+// must keep accepting the original single-subject "other types" phrasing
+// (Arcane Adaptation) AND the new "other creature types" phrasing (Rukarumel) on
+// the SAME single-subject sibling — the shared helper must not regress the
+// existing arm while gaining the new one.
+#[test]
+fn arcane_adaptation_accepts_other_creature_types_suffix_variant() {
+    let def = parse_static_line(
+        "Creatures you control are the chosen type in addition to their other creature types.",
+    )
+    .unwrap();
+    assert_eq!(
+        &def.modifications,
+        &vec![ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType,
+        }],
+        "the 'other creature types' suffix variant must still be additive: {:?}",
+        def.modifications
+    );
+}
+
 #[test]
 fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplemented() {
     let def = parse_static_line(

@@ -553,6 +553,16 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    // CR 607.2d + CR 205.1b: compound-subject sibling of the chosen-type static
+    // above — "<X> you control and <Y> you control are the chosen type..."
+    // (Rukarumel, Biologist). The sibling's subject matcher only recognizes
+    // three fixed single-subject forms, so a genuine two-conjunct subject falls
+    // through to it untouched; this handler only claims lines whose subject
+    // resolves to an `Or` of 2+ filters, so ordering relative to the sibling
+    // above is not load-bearing.
+    if let Some(def) = parse_compound_you_control_chosen_type_static(&tp, &text) {
+        return Some(def);
+    }
     // CR 305.6 + CR 607.2d: land-axis counterpart — "Lands you control are the
     // chosen type in addition to their other types" (Realmwright).
     if let Some(def) = parse_chosen_land_type_static(&tp, &text) {
