@@ -329,37 +329,70 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
 pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
-    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+
+    // CR 611.3a: an optional leading turn-window timing prefix — "During your
+    // turn, each <X> and <Y> you control ... is a ..." (Bello, Bard of the
+    // Brambles) — precedes the additive-type subject/predicate split below.
+    // Mirrors the equivalent peel in `parse_pronoun_becomes_type_static`.
+    let (body, body_lower, turn_condition) =
+        if let Ok((rest, _)) = tag::<_, _, VE>("during your turn, ").parse(lower.as_str()) {
+            let offset = lower.len() - rest.len();
+            (&text[offset..], rest, Some(StaticCondition::DuringYourTurn))
+        } else if let Ok((rest, _)) =
+            tag::<_, _, VE>("during turns other than yours, ").parse(lower.as_str())
+        {
+            let offset = lower.len() - rest.len();
+            (
+                &text[offset..],
+                rest,
+                Some(StaticCondition::Not {
+                    condition: Box::new(StaticCondition::DuringYourTurn),
+                }),
+            )
+        } else {
+            (text, lower.as_str(), None)
+        };
+
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(body_lower, |i| {
         alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
     })?;
-    let subject = text[..subject_lower.len()].trim();
-    let predicate = &text[text.len() - predicate_lower.len()..];
+    let subject = body[..subject_lower.len()].trim();
+    let predicate = &body[body.len() - predicate_lower.len()..];
     let affected = parse_continuous_subject_filter(subject)?;
 
     let predicate_tp = TextPair::new(predicate, predicate_lower);
-    if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
-        let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
-        let condition_text = after_cond.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(modifications)
-                .condition(condition)
-                .description(text.to_string()),
-        );
-    }
+    let (modifications, trailing_condition) =
+        if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
+            let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
+            let condition_text = after_cond.original.trim().trim_end_matches('.');
+            let condition =
+                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                });
+            (modifications, Some(condition))
+        } else {
+            (parse_additive_type_clause_modifications(predicate)?, None)
+        };
 
-    let modifications = parse_additive_type_clause_modifications(predicate)?;
-    Some(
-        StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(modifications)
-            .description(text.to_string()),
-    )
+    // CR 611.3a: compose the leading turn-window condition (if any) with a
+    // trailing "as long as" condition (if any) rather than dropping either.
+    let condition = match (turn_condition, trailing_condition) {
+        (Some(turn), Some(inner)) => Some(StaticCondition::And {
+            conditions: vec![turn, inner],
+        }),
+        (Some(turn), None) => Some(turn),
+        (None, Some(inner)) => Some(inner),
+        (None, None) => None,
+    };
+
+    let mut def = StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(modifications)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        def = def.condition(condition);
+    }
+    Some(def)
 }
 
 /// Parse compound condition + animation pattern:

@@ -22935,6 +22935,217 @@ fn conditional_static_animation_base_pt_equal_to_mana_value_keeps_condition() {
     }));
 }
 
+// CR 611.3 + CR 613.4b + CR 205.1b + CR 611.3a + issue #5442: Mephidross
+// Vampire (no-regression pin) — the single-subject "is a `<Subtype>` in
+// addition to its other creature types and has '`<ability>`'" predicate
+// (animation + additive type + quoted ability-grant, no keyword list, no
+// fixed P/T) must keep parsing unchanged after extending
+// `parse_additive_type_clause_modifications` for the Bello class.
+#[test]
+fn parser_shape_mephidross_vampire_animation_with_granted_ability() {
+    let def = parse_static_line(
+        "Each creature you control is a Vampire in addition to its other creature types and has \"Whenever this creature deals damage to a creature, put a +1/+1 counter on this creature.\"",
+    )
+    .expect("Mephidross Vampire's animation static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Vampire".to_string()
+            }),
+        "{:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "the granted 'Whenever ... put a +1/+1 counter' ability must produce a GrantTrigger: {:?}",
+        def.modifications
+    );
+    assert!(
+        !def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })),
+        "Mephidross Vampire grants no bare keywords: {:?}",
+        def.modifications
+    );
+}
+
+// CR 611.3 + CR 613.4b + CR 205.1b + CR 611.3a + issue #5442: Bello, Bard of
+// the Brambles — the singular "each `<X>` and `<Y>` [you control] with
+// `<suffix>` is a [P/T] `<type>` creature in addition to its other types and
+// has `K1`, `K2`, and '`<ability>`'" compound-subject animation class. Each
+// constituent piece already resolves in isolation — Starfield of Nyx proves
+// the single negated-type conjunct ("non-Aura enchantment you control ... is
+// a creature in addition to its other types"); Mephidross Vampire (above)
+// proves the animation + additive-type + ability-grant predicate bundle — but
+// the *combination* of a two-conjunct compound subject with a fixed P/T and a
+// bare-keyword-list-before-the-quote predicate was unreached
+// (`static_structure`/`Unimplemented` strict-fail).
+#[test]
+fn parser_shape_bello_compound_subject_animation_with_keywords_and_ability() {
+    let def = parse_static_line(
+        "During your turn, each non-Equipment artifact and non-Aura enchantment you control with mana value 4 or greater is a 4/4 Elemental creature in addition to its other types and has indestructible, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\"",
+    )
+    .expect("Bello's compound-subject animation static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        matches!(def.condition, Some(StaticCondition::DuringYourTurn)),
+        "'During your turn' must lower to DuringYourTurn: {:?}",
+        def.condition
+    );
+
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(
+                filters.len(),
+                2,
+                "expected 2 compound conjuncts: {filters:?}"
+            );
+            for filter in filters {
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::You),
+                            "'you control' must distribute to every conjunct: {tf:?}"
+                        );
+                        assert!(
+                            tf.properties.contains(&FilterProp::Cmc {
+                                comparator: Comparator::GE,
+                                value: QuantityExpr::Fixed { value: 4 },
+                            }),
+                            "'with mana value 4 or greater' must distribute to every conjunct: {tf:?}"
+                        );
+                    }
+                    other => panic!("expected a Typed conjunct, got {other:?}"),
+                }
+            }
+            let has_nonequipment_artifact = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Artifact)
+                            && tf.type_filters.contains(&TypeFilter::Non(Box::new(
+                                TypeFilter::Subtype("Equipment".to_string())
+                            )))
+                )
+            });
+            let has_nonaura_enchantment = filters.iter().any(|f| {
+                matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Enchantment)
+                            && tf.type_filters.contains(&TypeFilter::Non(Box::new(
+                                TypeFilter::Subtype("Aura".to_string())
+                            )))
+                )
+            });
+            assert!(
+                has_nonequipment_artifact,
+                "expected a non-Equipment artifact conjunct: {filters:?}"
+            );
+            assert!(
+                has_nonaura_enchantment,
+                "expected a non-Aura enchantment conjunct: {filters:?}"
+            );
+        }
+        other => panic!("expected an Or of 2 subject filters, got {other:?}"),
+    }
+
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetPower { value: 4 }),
+        "{:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetToughness { value: 4 }),
+        "{:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+        "{:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddSubtype {
+                subtype: "Elemental".to_string()
+            }),
+        "{:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Indestructible
+            }),
+        "the bare keyword list before the quoted ability must not be dropped: {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }),
+        "the bare keyword list before the quoted ability must not be dropped: {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+        "the granted 'Whenever ... draw a card' ability must produce a GrantTrigger: {:?}",
+        def.modifications
+    );
+}
+
+// Issue #5442: full Bello oracle text (a single line). The compound-subject
+// animation static must reach `result.statics`, not collapse into an
+// `Unimplemented` ability.
+#[test]
+fn parse_bello_full_oracle_produces_compound_subject_static() {
+    let oracle = "During your turn, each non-Equipment artifact and non-Aura enchantment you control with mana value 4 or greater is a 4/4 Elemental creature in addition to its other types and has indestructible, haste, and \"Whenever this creature deals combat damage to a player, draw a card.\"";
+    let result = crate::parser::oracle::parse_oracle_text(
+        oracle,
+        "Bello, Bard of the Brambles",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let has_bello_static = result.statics.iter().any(|def| {
+        matches!(def.affected, Some(TargetFilter::Or { ref filters }) if filters.len() == 2)
+            && def
+                .modifications
+                .contains(&ContinuousModification::SetPower { value: 4 })
+            && def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Indestructible,
+                })
+    });
+    assert!(
+        has_bello_static,
+        "Bello must produce the compound-subject animation static from full-oracle parsing: {:?}",
+        result.statics
+    );
+    assert!(
+        !result.abilities.iter().any(|ability| matches!(
+            *ability.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        )),
+        "Bello's single line must not collapse into an Unimplemented ability: {:?}",
+        result.abilities
+    );
+}
+
 // CR 700.9: "Modified creatures you control have <keyword>" class.
 // Previously misparsed as Subtype("Modified") (see commit body).
 #[test]

@@ -460,6 +460,39 @@ pub(crate) fn parse_additive_type_clause_modifications(
     .parse(clause_lower)
     .ok()?;
     let after_verb_original = &clause_original[clause_original.len() - after_verb_lower.len()..];
+
+    // CR 613.4b: an optional leading fixed P/T designation ("a 4/4 Elemental
+    // creature ...") sets base power/toughness alongside the additive type
+    // grant (Bello, Bard of the Brambles class). Opalescence / Starfield of
+    // Nyx / Mephidross Vampire carry no P/T token here, so `pt_modifications`
+    // stays empty and `after_verb_lower`/`after_verb_original` are unchanged
+    // for those lines — purely additive to the existing path.
+    let (after_pt_lower, pt_modifications): (&str, Vec<ContinuousModification>) = preceded(
+        opt(alt((tag::<_, _, VE>("a "), tag::<_, _, VE>("an ")))),
+        nom_primitives::parse_pt_value,
+    )
+    .parse(after_verb_lower)
+    .ok()
+    .and_then(|(rest, (power, toughness))| match (power, toughness) {
+        (
+            crate::types::ability::PtValue::Fixed(power),
+            crate::types::ability::PtValue::Fixed(toughness),
+        ) => {
+            let rest = rest.strip_prefix(' ')?;
+            Some((
+                rest,
+                vec![
+                    ContinuousModification::SetPower { value: power },
+                    ContinuousModification::SetToughness { value: toughness },
+                ],
+            ))
+        }
+        _ => None,
+    })
+    .unwrap_or((after_verb_lower, Vec::new()));
+    let after_pt_original =
+        &after_verb_original[after_verb_original.len() - after_pt_lower.len()..];
+
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
         (
@@ -479,9 +512,9 @@ pub(crate) fn parse_additive_type_clause_modifications(
             )),
         ),
     )
-    .parse(after_verb_lower)
+    .parse(after_pt_lower)
     .ok()?;
-    let type_words = &after_verb_original[..type_words_lower.len()];
+    let type_words = &after_pt_original[..type_words_lower.len()];
     let normalized_type_words = type_words_lower.trim();
     // Placeholders owned by other specialized extractors (basic-land-type copies,
     // chosen-type statics). Let those branches produce the correct modification.
@@ -508,11 +541,36 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let granted_original = granted_lower
         .map(|granted| &clause_original[clause_original.len() - granted.len()..])
         .map(str::trim);
-    let granted_modifications = granted_original
+    let mut granted_modifications = granted_original
         .map(parse_quoted_ability_modifications)
         .unwrap_or_default();
+    // CR 613.1f: a bare comma-separated keyword list may precede the quoted
+    // ability text on the same "... and has ..." clause ("has indestructible,
+    // haste, and \"Whenever ...\"" — Bello, Bard of the Brambles).
+    // `parse_quoted_ability_modifications` only classifies text INSIDE quote
+    // pairs, so recover the unquoted keyword-list prefix the same way
+    // `parse_continuous_modifications`'s own pre-quote recovery pass does
+    // (keyword_grant.rs). The trailing Oxford "and" connects the keyword list
+    // to the (separately-handled) quoted item, not to another keyword, so it
+    // is stripped before splitting rather than fed to `split_keyword_list`.
+    if let Some(granted) = granted_original {
+        if let Ok((_, pre_quote)) = take_until::<_, _, VE>("\"").parse(granted) {
+            let pre_quote = pre_quote.trim().trim_end_matches(',').trim();
+            let pre_quote = pre_quote.strip_suffix(" and").unwrap_or(pre_quote);
+            let pre_quote = pre_quote.trim_end_matches(',').trim();
+            if !pre_quote.is_empty() {
+                for part in split_keyword_list(pre_quote) {
+                    push_grant_clause_modifications(
+                        &mut granted_modifications,
+                        part.as_ref(),
+                        None,
+                    );
+                }
+            }
+        }
+    }
 
-    let mut modifications = Vec::new();
+    let mut modifications = pt_modifications;
     for raw_word in type_words.split_whitespace() {
         let word = raw_word.trim_matches(|c: char| c == ',' || c == '.');
         if word.is_empty() {
